@@ -46,6 +46,11 @@ class OffboardMission(Node):
         self.N_drone    =   N
 
         # define subscribers and publishers
+        self.trajectory_midpoint_publisher  =   self.create_publisher(          # Centroid publisher
+                    TrajectorySetpoint,
+                    '/px4_0/fmu/in/trajectory_midpoint',
+                    qos_profile_pub)
+        
         self.array_publishers     =   [{'offboard_mode_pub':None, 'trajectory_pub':None, 'vehicle_command_pub':None} for _ in range(self.N_drone)]
         self.array_subscribers    =   [{'status_sub':None, 'local_pos_sub':None, 'global_pos_sub':None} for _ in range(self.N_drone)]
 
@@ -111,10 +116,10 @@ class OffboardMission(Node):
             self.wpt_set_list[i][:,2]   +=  self.formation[i,2]
 
         # formation flight parameter initialization
-        self.velocity           =   4           # [m/s] velocity of the vehicle
+        self.velocity           =   np.float64(4.0)     # [m/s] velocity of the vehicle
         self.arm_counter_list   =   [0 for i in range(self.N_drone)]
         self.wpt_idx_list       =   np.array([np.int8(0) for _ in range(self.N_drone)])
-        self.nav_wpt_reach_rad  =   np.float32(6.0)     # [m] waypoint reach condition radius
+        self.nav_wpt_reach_rad  =   1.0*self.velocity   # [m] waypoint reach condition radius
 
         # variables for subscribing navigation information
         self.nav_state_list         =   [VehicleStatus.NAVIGATION_STATE_MAX for _ in range(self.N_drone)]
@@ -148,7 +153,7 @@ class OffboardMission(Node):
             self.attack_vector.append(np.array([0,0,0],dtype=np.float64))
 
         self.attack_vector[4]   =   self.formation[3,:]-self.formation[4,:]
-        self.attack_vector[2]   =   self.formation[2,:]
+        self.attack_vector[2]   =   3*self.formation[2,:]
 
         self.attack_duration    =   np.float64(10.0)
         self.attack_timer       =   np.float64(0.0)
@@ -193,16 +198,27 @@ class OffboardMission(Node):
         msg.position            =   np.array(self.trajectory_set_pt[id],dtype=np.float32)
         msg.yaw                 =   float(self.yaw_set_pt[id])
         self.array_publishers[id]['trajectory_pub'].publish(msg)
+    
+    def publish_trajectory_centroid(self):
+        msg                     =   TrajectorySetpoint()
+        msg.timestamp           =   int(Clock().now().nanoseconds/1000)
+        msg.position            =   np.array(self.trajectory_centroid,dtype=np.float32)
+        msg.yaw                 =   float(self.yaw_set_pt[id])
+        self.array_publishers[id]['trajectory_pub'].publish(msg)
 
     def cmdloop_callback(self):
 
-        for idx in range(self.N_drone):
+        # Publish Centroid Trajectory
+        #TODO
+
+        # Publish Set of Trajectories
+        for idx in range(self.N_drone): 
 
             if self.flight_phase[idx] == 0:
 
                 # entry:
                 # compensation of local position coordinate
-                if self.global_ref_lla_list[idx] is not None and self.entry_execute[idx] is False:
+                if self.global_ref_lla_list[idx] is not None and self.local_pos_ned_list[idx] is not None and self.entry_execute[idx] is False:
                     self.ned_spawn_offset[idx]  =   navpy.lla2ned(self.global_ref_lla_list[idx][0],self.global_ref_lla_list[idx][1],0,
                                                                 self.ref_lla[0],self.ref_lla[1],self.ref_lla[2],
                                                                 latlon_unit='deg', alt_unit='m', model='wgs84')
@@ -240,17 +256,24 @@ class OffboardMission(Node):
                 if self.entry_execute[idx] is False:
                     self.prev_wpt_list[idx]     =   np.copy(self.next_wpt_list[idx])
                     self.next_wpt_list[idx]     =   np.copy(self.wpt_set_list[idx][self.wpt_idx_list[idx],:])
+                    self.omega                  =   np.float64(0.0)
 
                     norm        =   np.linalg.norm(self.next_wpt_list[idx]-self.prev_wpt_list[idx])
-                    self.trajectory_set_pt[idx][0]  =   np.clip(self.local_pos_ned_list[idx][0]+self.velocity*
-                                                                (self.next_wpt_list[idx][0]-self.prev_wpt_list[idx][0])/norm,
-                                                                self.prev_wpt_list[idx][0], self.next_wpt_list[idx][0])
-                    self.trajectory_set_pt[idx][1]  =   np.clip(self.local_pos_ned_list[idx][1]+self.velocity*
-                                                                (self.next_wpt_list[idx][1]-self.prev_wpt_list[idx][1])/norm,
-                                                                self.prev_wpt_list[idx][1], self.next_wpt_list[idx][1])
-                    self.trajectory_set_pt[idx][2]  =   np.clip(self.local_pos_ned_list[idx][2]+self.velocity*
-                                                                (self.next_wpt_list[idx][2]-self.prev_wpt_list[idx][2])/norm,
-                                                                self.prev_wpt_list[idx][2], self.next_wpt_list[idx][2])
+                    self.trajectory_set_pt[idx][0]  =   np.clip((1-self.omega)*self.prev_wpt_list[idx][0] \
+                                                                +self.omega*self.next_wpt_list[idx][0] \
+                                                                +0.3*self.velocity*(self.next_wpt_list[idx][0]-self.prev_wpt_list[idx][0])/norm, \
+                                                                np.min(np.array([self.prev_wpt_list[idx][0], self.next_wpt_list[idx][0]])), \
+                                                                np.max(np.array([self.prev_wpt_list[idx][0], self.next_wpt_list[idx][0]])))                          
+                    self.trajectory_set_pt[idx][1]  =   np.clip((1-self.omega)*self.prev_wpt_list[idx][1] \
+                                                                +self.omega*self.next_wpt_list[idx][1] \
+                                                                +0.3*self.velocity*(self.next_wpt_list[idx][1]-self.prev_wpt_list[idx][1])/norm, \
+                                                                np.min(np.array([self.prev_wpt_list[idx][1], self.next_wpt_list[idx][1]])), \
+                                                                np.max(np.array([self.prev_wpt_list[idx][1], self.next_wpt_list[idx][1]])))
+                    self.trajectory_set_pt[idx][2]  =   np.clip((1-self.omega)*self.prev_wpt_list[idx][2] \
+                                                                +self.omega*self.next_wpt_list[idx][2] \
+                                                                +0.3*self.velocity*(self.next_wpt_list[idx][2]-self.prev_wpt_list[idx][2])/norm, \
+                                                                np.min(np.array([self.prev_wpt_list[idx][2], self.next_wpt_list[idx][2]])), \
+                                                                np.max(np.array([self.prev_wpt_list[idx][2], self.next_wpt_list[idx][2]])))
                     self.yaw_set_pt[idx]        =   self.yaw_set_pt[idx]
 
                     self.publish_offboard_control_mode(idx)
@@ -260,35 +283,48 @@ class OffboardMission(Node):
 
                 if self.entry_execute[idx] is True:
                     norm        =   np.linalg.norm(self.next_wpt_list[idx]-self.prev_wpt_list[idx])
-
-                    self.trajectory_set_pt[idx][0]  =   np.clip(self.local_pos_ned_list[idx][0]+self.velocity*
-                                                                (self.next_wpt_list[idx][0]-self.prev_wpt_list[idx][0])/norm,
-                                                                self.prev_wpt_list[idx][0], self.next_wpt_list[idx][0]) \
+                    self.trajectory_set_pt[idx][0]  =   np.clip((1-self.omega)*self.prev_wpt_list[idx][0] \
+                                                                +self.omega*self.next_wpt_list[idx][0] \
+                                                                +0.3*self.velocity*(self.next_wpt_list[idx][0]-self.prev_wpt_list[idx][0])/norm, \
+                                                                np.min(np.array([self.prev_wpt_list[idx][0], self.next_wpt_list[idx][0]])), \
+                                                                np.max(np.array([self.prev_wpt_list[idx][0], self.next_wpt_list[idx][0]]))) \
                                                         +self.attack_vector[idx][0]*self.attack_timer
-                    self.trajectory_set_pt[idx][1]  =   np.clip(self.local_pos_ned_list[idx][1]+self.velocity*
-                                                                (self.next_wpt_list[idx][1]-self.prev_wpt_list[idx][1])/norm,
-                                                                self.prev_wpt_list[idx][1], self.next_wpt_list[idx][1]) \
-                                                        +self.attack_vector[idx][1]*self.attack_timer
-                    self.trajectory_set_pt[idx][2]  =   np.clip(self.local_pos_ned_list[idx][2]+self.velocity*
-                                                                (self.next_wpt_list[idx][2]-self.prev_wpt_list[idx][2])/norm,
-                                                                self.prev_wpt_list[idx][2], self.next_wpt_list[idx][2]) \
-                                                        +self.attack_vector[idx][2]*self.attack_timer
-                    self.yaw_set_pt[idx]        =   self.yaw_set_pt[idx]
 
-                    print(self.attack_vector[idx]*self.attack_timer)
+                    self.trajectory_set_pt[idx][1]  =   np.clip((1-self.omega)*self.prev_wpt_list[idx][1] \
+                                                                +self.omega*self.next_wpt_list[idx][1] \
+                                                                +0.3*self.velocity*(self.next_wpt_list[idx][1]-self.prev_wpt_list[idx][1])/norm, \
+                                                                np.min(np.array([self.prev_wpt_list[idx][1], self.next_wpt_list[idx][1]])), \
+                                                                np.max(np.array([self.prev_wpt_list[idx][1], self.next_wpt_list[idx][1]]))) \
+                                                        +self.attack_vector[idx][1]*self.attack_timer    
+                    self.trajectory_set_pt[idx][2]  =   np.clip((1-self.omega)*self.prev_wpt_list[idx][2] \
+                                                                +self.omega*self.next_wpt_list[idx][2] \
+                                                                +0.3*self.velocity*(self.next_wpt_list[idx][2]-self.prev_wpt_list[idx][2])/norm, \
+                                                                np.min(np.array([self.prev_wpt_list[idx][2], self.next_wpt_list[idx][2]])), \
+                                                                np.max(np.array([self.prev_wpt_list[idx][2], self.next_wpt_list[idx][2]]))) \
+                                                        +self.attack_vector[idx][2]*self.attack_timer    
+                                 
+                    self.yaw_set_pt[idx]        =   self.yaw_set_pt[idx]
 
                     self.publish_offboard_control_mode(idx)
                     self.publish_trajectory_setpoint(idx)
 
-                    if np.linalg.norm(self.next_wpt_list[idx]-self.local_pos_ned_list[idx]) < self.nav_wpt_reach_rad and self.wpt_idx_list[idx] < np.shape(self.wpt_set_list[idx])[0]-1:
+                    if np.linalg.norm(self.next_wpt_list[idx]-self.local_pos_ned_list[idx]+self.attack_vector[idx]*self.attack_timer) < self.nav_wpt_reach_rad and self.wpt_idx_list[idx] < np.shape(self.wpt_set_list[idx])[0]-1:
                         self.wpt_change_flag[idx]   =   True
 
-                    elif np.linalg.norm(self.next_wpt_list[idx]-self.local_pos_ned_list[idx]) < self.nav_wpt_reach_rad and self.wpt_idx_list[idx] == np.shape(self.wpt_set_list[idx])[0]-1:
+                    elif np.linalg.norm(self.next_wpt_list[idx]-self.local_pos_ned_list[idx]+self.attack_vector[idx]*self.attack_timer) < self.nav_wpt_reach_rad and self.wpt_idx_list[idx] == np.shape(self.wpt_set_list[idx])[0]-1:
                         self.next_phase_flag[idx]   =   True
 
-                if idx == 0 and self.wpt_idx_list[idx] >= 4:
+                if idx == 0 and self.wpt_idx_list[idx] >= 6:
                     self.attack_timer   =   np.clip(self.attack_timer+self.timer_period/self.attack_duration,0,1)
-                    print(self.attack_timer)
+                    print('C2 Link Hijacking')
+
+                if idx == 0 and self.wpt_idx_list[idx] >= 7:
+                    self.attack_timer   =   np.float64(0.0)
+
+                if idx == 0:
+                    norm_delt       =   np.linalg.norm(self.next_wpt_list[idx]-self.prev_wpt_list[idx])/self.velocity
+                    self.omega      =   self.omega+self.timer_period/norm_delt
+                    self.omega      =   np.clip(self.omega,0,1)
 
             elif self.flight_phase[idx] == 2:
                    
@@ -302,6 +338,8 @@ class OffboardMission(Node):
             print('Next Flight Phase')
 
         if all(self.wpt_change_flag):
+
+            self.omega                  =   np.float64(0.0)
 
             for idx in range(self.N_drone):
                 self.wpt_idx_list[idx]      =   self.wpt_idx_list[idx]+1

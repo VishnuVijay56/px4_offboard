@@ -32,19 +32,24 @@
 #
 ############################################################################
 
-__author__ = "Kartik Anand Pant"
-__contact__ = "kpant14@gmail.com"
+__author__ = "Jaeyoung Lim"
+__contact__ = "jalim@ethz.ch"
 
-import navpy
-import rclpy
+from re import M
 import numpy as np
+import math
+import rclpy
 from rclpy.node import Node
+from rclpy.clock import Clock
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
+
 from px4_msgs.msg import VehicleAttitude
 from px4_msgs.msg import VehicleLocalPosition
-from geometry_msgs.msg import PoseStamped, TransformStamped
+from px4_msgs.msg import TrajectorySetpoint
+from geometry_msgs.msg import PoseStamped, Point, TransformStamped
 from tf2_ros import TransformBroadcaster
 from nav_msgs.msg import Path
+from visualization_msgs.msg import Marker
 
 
 def vector2PoseMsg(frame_id, position, attitude):
@@ -66,59 +71,52 @@ class PX4Visualizer(Node):
 
         # Configure subscritpions
         qos_profile = QoSProfile(
-            reliability=QoSReliabilityPolicy.BEST_EFFORT,
-            history=QoSHistoryPolicy.KEEP_LAST,
+            reliability=QoSReliabilityPolicy.RMW_QOS_POLICY_RELIABILITY_BEST_EFFORT,
+            history=QoSHistoryPolicy.RMW_QOS_POLICY_HISTORY_KEEP_LAST,
             depth=1,
         )
-        self.declare_parameter('px4_ns', 'px4_1')
-        
-        self.ns = self.get_parameter('px4_ns').get_parameter_value().string_value
+
         self.attitude_sub = self.create_subscription(
             VehicleAttitude,
-            f'{self.ns}/fmu/out/vehicle_attitude',
+            "/px4_1/fmu/out/vehicle_attitude",
             self.vehicle_attitude_callback,
             qos_profile,
         )
         self.local_position_sub = self.create_subscription(
             VehicleLocalPosition,
-            f'{self.ns}/fmu/out/vehicle_local_position',
+            "/px4_1/fmu/out/vehicle_local_position",
             self.vehicle_local_position_callback,
             qos_profile,
         )
-     
+        self.setpoint_sub = self.create_subscription(
+            TrajectorySetpoint,
+            "/px4_1/fmu/in/trajectory_setpoint",
+            self.trajectory_setpoint_callback,
+            qos_profile,
+        )
+
+        self.vehicle_pose_pub = self.create_publisher(
+            PoseStamped, "/px4_visualizer/vehicle_pose", 10
+        )
+        self.vehicle_vel_pub = self.create_publisher(
+            Marker, "/px4_visualizer/vehicle_velocity", 10
+        )
         self.vehicle_path_pub = self.create_publisher(
-            Path, f'{self.ns}/px4_visualizer/vehicle_path', 10
+            Path, "/px4_visualizer/vehicle_path", 10
         )
-        self.setpoint_path_pub = self.create_publisher(
-            Path, f'{self.ns}/px4_visualizer/setpoint_path', 10
-        )
-
-        # Gazebo Model Origin 
-        self.lla_ref = np.array([24.484043629238872, 54.36068616768677, 0]) # latlonele -> (deg,deg,m)
-        self.waypoint_idx = 0
-        self.waypoints_lla = np.array([
-           [24.484326113268185, 54.360644616972564, 30],
-           [24.48476311664666, 54.3614948536716, 30],
-           [24.485097533474377, 54.36197496905472, 30],
-           [24.485400216562002, 54.3625570084458, 30], 
-           [24.48585179883862, 54.36321951405934, 30], 
-           [24.486198417650844, 54.363726451568475, 30], 
-           [24.486564563238797, 54.36423338904003, 0], 
-        ])
-        self.wpt_set_ = navpy.lla2ned(self.waypoints_lla[:,0], self.waypoints_lla[:,1],
-                    self.waypoints_lla[:,2],self.lla_ref[0], self.lla_ref[1], self.lla_ref[2],
-                    latlon_unit='deg', alt_unit='m', model='wgs84')
-
         # Initialize the transform broadcaster
         self.tf_broadcaster = TransformBroadcaster(self)
+
         self.vehicle_attitude = np.array([1.0, 0.0, 0.0, 0.0])
         self.vehicle_local_position = np.array([0.0, 0.0, 0.0])
         self.vehicle_local_velocity = np.array([0.0, 0.0, 0.0])
         self.setpoint_position = np.array([0.0, 0.0, 0.0])
         self.vehicle_path_msg = Path()
         self.setpoint_path_msg = Path()
+
         # trail size
         self.trail_size = 1000
+
         timer_period = 0.05  # seconds
         self.timer = self.create_timer(timer_period, self.cmdloop_callback)
 
@@ -138,49 +136,89 @@ class PX4Visualizer(Node):
         self.vehicle_local_velocity[1] = msg.vx
         self.vehicle_local_velocity[2] = -msg.vz
 
+    def trajectory_setpoint_callback(self, msg):
+        self.setpoint_position[0] = msg.position[0]
+        self.setpoint_position[1] = -msg.position[1]
+        self.setpoint_position[2] = -msg.position[2]
+
+    def create_arrow_marker(self, id, tail, vector):
+        msg = Marker()
+        msg.action = Marker.ADD
+        msg.header.frame_id = "map"
+        # msg.header.stamp = Clock().now().nanoseconds / 1000
+        msg.ns = "arrow"
+        msg.id = id
+        msg.type = Marker.ARROW
+        msg.scale.x = 0.1
+        msg.scale.y = 0.2
+        msg.scale.z = 0.0
+        msg.color.r = 0.5
+        msg.color.g = 0.5
+        msg.color.b = 0.0
+        msg.color.a = 1.0
+        dt = 0.3
+        tail_point = Point()
+        tail_point.x = tail[0]
+        tail_point.y = tail[1]
+        tail_point.z = tail[2]
+        head_point = Point()
+        head_point.x = tail[0] + dt * vector[0]
+        head_point.y = tail[1] + dt * vector[1]
+        head_point.z = tail[2] + dt * vector[2]
+        msg.points = [tail_point, head_point]
+        return msg
+
     def append_vehicle_path(self, msg):
         self.vehicle_path_msg.poses.append(msg)
         if len(self.vehicle_path_msg.poses) > self.trail_size:
             del self.vehicle_path_msg.poses[0]
 
+    def append_setpoint_path(self, msg):
+        self.setpoint_path_msg.poses.append(msg)
+        if len(self.setpoint_path_msg.poses) > self.trail_size:
+            del self.setpoint_path_msg.poses[0]
+
     def cmdloop_callback(self):
         vehicle_pose_msg = vector2PoseMsg(
             "map", self.vehicle_local_position, self.vehicle_attitude
         )
+        self.vehicle_pose_pub.publish(vehicle_pose_msg)
         t = TransformStamped()
 
         # Read message content and assign it to
         # corresponding tf variables
         t.header.stamp = self.get_clock().now().to_msg()
         t.header.frame_id = 'map'
-        t.child_frame_id = 'Estimated_Pose'
+        t.child_frame_id = 'drone'
+
+        # Turtle only exists in 2D, thus we get x and y translation
+        # coordinates from the message and set the z coordinate to 0
         t.transform.translation.x = vehicle_pose_msg.pose.position.x
         t.transform.translation.y = vehicle_pose_msg.pose.position.y
         t.transform.translation.z = vehicle_pose_msg.pose.position.z
+
+        # For the same reason, turtle can only rotate around one axis
+        # and this why we set rotation in x and y to 0 and obtain
+        # rotation in z axis from the message
         t.transform.rotation.x = vehicle_pose_msg.pose.orientation.x
         t.transform.rotation.y = vehicle_pose_msg.pose.orientation.y
         t.transform.rotation.z = vehicle_pose_msg.pose.orientation.z
         t.transform.rotation.w = vehicle_pose_msg.pose.orientation.w
+
         # Send the transformation
         self.tf_broadcaster.sendTransform(t)
-        
-        # Publish set waypoints
-        setpoint_path_msg = Path()
-        setpoint_pose_msg = vector2PoseMsg("map", [0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0])
-        setpoint_path_msg.poses.append(setpoint_pose_msg)
-        for i in range(self.wpt_set_.shape[0]):
-            enu = np.array([self.wpt_set_[i,1], self.wpt_set_[i,0], -self.wpt_set_[i,2]])
-            setpoint_pose_msg = vector2PoseMsg("map", enu, [0.0, 0.0, 0.0, 1.0])
-            setpoint_path_msg.poses.append(setpoint_pose_msg)
-      
-        setpoint_path_msg.header = setpoint_pose_msg.header
-        self.setpoint_path_pub.publish(setpoint_path_msg)
-
 
         # Publish time history of the vehicle path
         self.vehicle_path_msg.header = vehicle_pose_msg.header
         self.append_vehicle_path(vehicle_pose_msg)
         self.vehicle_path_pub.publish(self.vehicle_path_msg)
+
+       
+
+        # Publish arrow markers for velocity
+        velocity_msg = self.create_arrow_marker(1, self.vehicle_local_position, self.vehicle_local_velocity)
+        self.vehicle_vel_pub.publish(velocity_msg)
+
 
 def main(args=None):
     rclpy.init(args=args)

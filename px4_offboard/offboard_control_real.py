@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 
 __author__ = "Kartik Anand Pant"
-__contact__ = "kpant14@gmail.com"
+__contact__ = "@purdue.edu"
+
+import argparse
 
 import rclpy
 import numpy as np
@@ -18,7 +20,9 @@ from px4_msgs.msg import VehicleStatus, VehicleOdometry, VehicleCommand
 class OffboardMission(Node):
 
     def __init__(self):
+
         super().__init__("px4_offboard_mission")
+
         # set publisher and subscriber quality of service profile
         qos_profile_pub = QoSProfile(
             reliability = QoSReliabilityPolicy.BEST_EFFORT,
@@ -33,9 +37,7 @@ class OffboardMission(Node):
             history = QoSHistoryPolicy.KEEP_LAST,
             depth = 1
         )
-        self.declare_parameter('px4_ns', 'px4_1')
-        
-        self.ns = self.get_parameter('px4_ns').get_parameter_value().string_value
+        self.ns = '/px4_1'
         # define subscribers
         self.status_sub = self.create_subscription(
             VehicleStatus,
@@ -72,10 +74,12 @@ class OffboardMission(Node):
         self.timer = self.create_timer(self.timer_period, self.cmdloop_callback)
         
         self.wpt_set_ = np.array([[0, 0,-1.2],
-                                  [0, -1.3,-1.2],
-                                  [5.0, -1.3, -1.2]
+                                  [4.0, 0.0,-2.2],
+                                  [2.0, 2.0,-0.2],
+                                  [1.0, -12.0,-12],
+                                  [0.0, 0.0,-2.2]
                                   ])
-        self.p_gain = 1
+        self.velocity = 1
         self.wpt_idx_ = np.int8(0)
         self.nav_wpt_reach_rad_ =   np.float32(0.5)     # waypoint reach condition radius
         # variables for subscribers
@@ -113,6 +117,12 @@ class OffboardMission(Node):
         offboard_msg.acceleration=False
         self.publisher_offboard_mode.publish(offboard_msg)
         
+        #SiTL Test
+        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, 1., 6.)
+        if self.nav_state != VehicleStatus.ARMING_STATE_ARMED and self.arm_counter < 10:
+            self.arm_counter += 1
+            self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0)
+
 
         if self.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD:
             norm = np.linalg.norm(self.next_wpt_ - self.prev_wpt_)
@@ -123,19 +133,19 @@ class OffboardMission(Node):
             x_min = np.min([self.prev_wpt_[0], self.next_wpt_[0]])
             x_max = np.max([self.prev_wpt_[0], self.next_wpt_[0]])
             x_pos = np.clip(self.local_pos_ned_[0] \
-                            + self.p_gain * (self.next_wpt_[0] - self.prev_wpt_[0])/norm, \
+                            + self.velocity * (self.next_wpt_[0] - self.prev_wpt_[0])/norm, \
                                 x_min, x_max)
             
             y_min = np.min([self.prev_wpt_[1], self.next_wpt_[1]])
             y_max = np.max([self.prev_wpt_[1], self.next_wpt_[1]])
             y_pos = np.clip(self.local_pos_ned_[1] \
-                            + self.p_gain * (self.next_wpt_[1] - self.prev_wpt_[1])/norm, \
+                            + self.velocity * (self.next_wpt_[1] - self.prev_wpt_[1])/norm, \
                                 y_min, y_max)
             
             z_min = np.min([-self.prev_wpt_[2], -self.next_wpt_[2]])
             z_max = np.max([-self.prev_wpt_[2], -self.next_wpt_[2]])
             z_pos = np.clip(self.local_pos_ned_[2] \
-                            + self.p_gain * (self.next_wpt_[2] - self.prev_wpt_[2])/norm, \
+                            + self.velocity * (self.next_wpt_[2] - self.prev_wpt_[2])/norm, \
                                 -z_max, -z_min)
 
             trajectory_msg.position[0]  = x_pos
@@ -160,9 +170,14 @@ class OffboardMission(Node):
 
 
 def main():
+
+   
     rclpy.init(args=None)
+
     offboard_mission = OffboardMission()
+
     rclpy.spin(offboard_mission)
+
     offboard_mission.destroy_node()
     rclpy.shutdown()
 
